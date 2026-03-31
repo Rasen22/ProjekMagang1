@@ -1,0 +1,317 @@
+name: CI-CD Next Nest Supabase
+
+on:
+  push:
+    branches:
+      - dev
+      - staging
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run lint
+        run: pnpm lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run test
+        run: pnpm test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run build
+        run: pnpm build
+
+  deploy_dev:
+    name: Deploy Development
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/dev'
+    environment:
+      name: development
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_DEV }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_DEV }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER_DEV }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+
+      - name: Supabase migrate dev
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase db push --db-url "$SUPABASE_DB_URL"
+
+      - name: Setup SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy via SSH (dev)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" << 'EOF'
+            set -euo pipefail
+            cd /var/www/projekmagang1
+            git fetch --all
+            git checkout dev
+            git pull origin dev
+            pnpm install --frozen-lockfile
+            pnpm build
+            pm2 reload all || pm2 start ecosystem.config.js
+          EOF
+
+      - name: Notify failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -X POST -H "Content-type: application/json" \
+            --data "{\"text\":\"[DEV] Deploy failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+  deploy_staging:
+    name: Deploy Staging
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/staging'
+    environment:
+      name: staging
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_STAGING }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_STAGING }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER_STAGING }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+
+      - name: Backup staging before migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backup
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/staging-backup.sql
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-db-backup
+          path: backup/staging-backup.sql
+          retention-days: 7
+
+      - name: Supabase migrate staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase db push --db-url "$SUPABASE_DB_URL"
+
+      - name: Setup SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy via SSH (staging)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" << 'EOF'
+            set -euo pipefail
+            cd /var/www/projekmagang1
+            git fetch --all
+            git checkout staging
+            git pull origin staging
+            pnpm install --frozen-lockfile
+            pnpm build
+            pm2 reload all || pm2 start ecosystem.config.js
+          EOF
+
+      - name: Notify failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -X POST -H "Content-type: application/json" \
+            --data "{\"text\":\"[STAGING] Deploy failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+  migrate_prod_dry_run:
+    name: Production Migration Dry Run
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/master'
+    environment:
+      name: production
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_PROD }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+
+      - name: Supabase migrate dry-run (production)
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase db push --db-url "$SUPABASE_DB_URL" --dry-run
+
+      - name: Notify failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -X POST -H "Content-type: application/json" \
+            --data "{\"text\":\"[PROD] Dry-run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+  deploy_prod:
+    name: Deploy Production
+    runs-on: ubuntu-latest
+    needs: [migrate_prod_dry_run]
+    if: github.ref == 'refs/heads/master'
+    environment:
+      name: production
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_PROD }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_PROD }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER_PROD }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+
+      - name: Apply migration after manual approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase db push --db-url "$SUPABASE_DB_URL"
+
+      - name: Setup SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy via SSH (production)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" << 'EOF'
+            set -euo pipefail
+            cd /var/www/projekmagang1
+            git fetch --all
+            git checkout master
+            git pull origin master
+            pnpm install --frozen-lockfile
+            pnpm build
+            pm2 reload all || pm2 start ecosystem.config.js
+          EOF
+
+      - name: Notify failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -X POST -H "Content-type: application/json" \
+            --data "{\"text\":\"[PROD] Deploy failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
