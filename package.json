@@ -4,12 +4,22 @@
   "private": true,
   "scripts": {
     "prepare": "husky",
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "pnpm --filter api start:dev",
+    "dev": "pnpm -r --parallel --filter web --filter api dev",
     "lint": "pnpm -r --if-present lint",
     "test": "pnpm -r --if-present test",
-    "build": "pnpm -r --if-present build"
+    "build": "pnpm -r --if-present build",
+    "build:shared": "pnpm --filter @repo/shared build",
+    "build:web": "pnpm --filter web build",
+    "build:api": "pnpm --filter api build"
   },
   "lint-staged": {
-    "*.{js,jsx,ts,tsx,json,md,yml,yaml}": [
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
       "prettier --write"
     ]
   },
@@ -19,6 +29,13 @@
     "eslint": "^9.23.0",
     "husky": "^9.1.7",
     "lint-staged": "^15.5.0",
-    "prettier": "^3.5.3"
+    "prettier": "^3.5.3",
+    "prisma": "^6.19.2",
+    "supabase": "^2.84.5",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.2",
+    "@supabase/supabase-js": "^2.101.1"
   }
 }
